@@ -1,0 +1,835 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <!--
+    If you are serving your web app in a path other than the root, change the
+    href value below to reflect the base path you are serving from.
+
+    The path provided below has to start and end with a slash "/" in order for
+    it to work correctly.
+
+    For more details:
+    * https://developer.mozilla.org/en-US/docs/Web/HTML/Element/base
+
+    This is a placeholder for base href that will be replaced by the value of
+    the `--base-href` argument provided to `flutter build`.
+  -->
+  <base href="/glowmates-pages/">
+
+  <meta charset="UTF-8">
+  <meta content="IE=Edge" http-equiv="X-UA-Compatible">
+  <meta name="description" content="A new Flutter project.">
+
+  <!-- iOS meta tags & icons -->
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black">
+  <meta name="apple-mobile-web-app-title" content="xiaoguang_app">
+  <link rel="apple-touch-icon" href="icons/Icon-192.png">
+
+  <!-- Favicon -->
+  <link rel="icon" type="image/png" href="favicon.png"/>
+
+  <title>Glowmates · 小光萌宠</title>
+  <link rel="manifest" href="manifest.json">
+
+  <!-- ============================================
+       浏览器录音 — 采集 16kHz 单声道 PCM，封装成 WAV（base64）
+       豆包/火山引擎 ASR 100% 接受 WAV，不依赖 Google（国内可用）
+       Dart 端调用：
+         window.glowmatesStartRecording(onError)
+         window.glowmatesStopRecording(onWavBase64, onError)
+         window.isGlowmatesRecordingAvailable() : boolean
+  ============================================ -->
+  <script>
+    (function () {
+      var audioCtx = null, stream = null, processor = null, source = null;
+      var pcmChunks = [], recording = false;
+      var SAMPLE_RATE = 16000;
+
+      window.isGlowmatesRecordingAvailable = function () {
+        return !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia &&
+                  (window.AudioContext || window.webkitAudioContext));
+      };
+
+      window.glowmatesStartRecording = function (onError) {
+        if (recording) return;
+        if (!window.isGlowmatesRecordingAvailable()) {
+          try { onError('not_supported'); } catch (e) {}
+          return;
+        }
+        pcmChunks = [];
+        navigator.mediaDevices.getUserMedia({ audio: true }).then(function (s) {
+          stream = s;
+          var AC = window.AudioContext || window.webkitAudioContext;
+          audioCtx = new AC({ sampleRate: SAMPLE_RATE });
+          source = audioCtx.createMediaStreamSource(stream);
+          processor = audioCtx.createScriptProcessor(4096, 1, 1);
+          processor.onaudioprocess = function (e) {
+            if (!recording) return;
+            var input = e.inputBuffer.getChannelData(0);
+            pcmChunks.push(new Float32Array(input));
+          };
+          source.connect(processor);
+          processor.connect(audioCtx.destination);
+          recording = true;
+        }).catch(function (err) {
+          try { onError(String(err && err.name ? err.name : err)); } catch (e) {}
+        });
+      };
+
+      window.glowmatesStopRecording = function (onWavBase64, onError) {
+        if (!recording) { try { onError('not_recording'); } catch (e) {} return; }
+        recording = false;
+        try {
+          if (processor) { processor.disconnect(); processor.onaudioprocess = null; }
+          if (source) source.disconnect();
+          if (stream) stream.getTracks().forEach(function (t) { t.stop(); });
+          if (audioCtx) audioCtx.close();
+        } catch (e) {}
+
+        // 合并所有 Float32 PCM
+        var total = 0;
+        for (var i = 0; i < pcmChunks.length; i++) total += pcmChunks[i].length;
+        if (total === 0) { try { onError('empty'); } catch (e) {} return; }
+        var pcm = new Float32Array(total);
+        var off = 0;
+        for (var j = 0; j < pcmChunks.length; j++) {
+          pcm.set(pcmChunks[j], off); off += pcmChunks[j].length;
+        }
+        pcmChunks = [];
+
+        // Float32 -> Int16
+        var int16 = new Int16Array(pcm.length);
+        for (var k = 0; k < pcm.length; k++) {
+          var s = Math.max(-1, Math.min(1, pcm[k]));
+          int16[k] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+        }
+
+        // 拼 WAV：44 字节头 + PCM
+        var dataLen = int16.length * 2;
+        var buf = new ArrayBuffer(44 + dataLen);
+        var dv = new DataView(buf);
+        function ws(off, str) { for (var i=0;i<str.length;i++) dv.setUint8(off+i, str.charCodeAt(i)); }
+        ws(0, 'RIFF');
+        dv.setUint32(4, 36 + dataLen, true);
+        ws(8, 'WAVE');
+        ws(12, 'fmt ');
+        dv.setUint32(16, 16, true);          // fmt chunk size
+        dv.setUint16(20, 1, true);           // PCM
+        dv.setUint16(22, 1, true);           // mono
+        dv.setUint32(24, SAMPLE_RATE, true);
+        dv.setUint32(28, SAMPLE_RATE * 2, true); // byte rate
+        dv.setUint16(32, 2, true);           // block align
+        dv.setUint16(34, 16, true);          // bits per sample
+        ws(36, 'data');
+        dv.setUint32(40, dataLen, true);
+        var bytes = new Uint8Array(buf);
+        bytes.set(new Uint8Array(int16.buffer), 44);
+
+        // base64
+        var bin = '';
+        var CH = 0x8000;
+        for (var p = 0; p < bytes.length; p += CH) {
+          bin += String.fromCharCode.apply(null, bytes.subarray(p, p + CH));
+        }
+        try { onWavBase64(btoa(bin)); } catch (e) {
+          try { onError(String(e)); } catch (e2) {}
+        }
+      };
+    })();
+  </script>
+
+  <!-- ============================================
+       小光球语音识别 — Web Speech API (Chrome / Edge)
+       Dart 端调用：
+         window.startGlowmatesSpeech(onResult, onError, lang)
+         window.stopGlowmatesSpeech()
+         window.isGlowmatesSpeechAvailable() : boolean
+  ============================================ -->
+  <script>
+    (function () {
+      var rec = null;
+      window.isGlowmatesSpeechAvailable = function () {
+        return !!(window.SpeechRecognition || window.webkitSpeechRecognition);
+      };
+      window.startGlowmatesSpeech = function (onResult, onError, onEnd, lang) {
+        var SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+        if (!SR) { try { onError('not_supported'); } catch (e) {} return; }
+        try {
+          if (rec) { try { rec.abort(); } catch (e) {} rec = null; }
+          rec = new SR();
+          rec.lang = lang || 'zh-CN';
+          rec.continuous = false;
+          rec.interimResults = false;
+          rec.maxAlternatives = 1;
+          rec.onresult = function (e) {
+            if (e.results && e.results.length > 0) {
+              var last = e.results[e.results.length - 1];
+              if (last && last[0]) {
+                try { onResult(last[0].transcript || ''); } catch (err) {}
+              }
+            }
+          };
+          rec.onerror = function (e) {
+            try { onError(e.error || 'unknown'); } catch (err) {}
+          };
+          // 浏览器结束识别（无论有没有结果）都回调 Dart，避免状态卡死
+          rec.onend = function () {
+            rec = null;
+            try { onEnd && onEnd(); } catch (e) {}
+          };
+          rec.start();
+        } catch (err) {
+          try { onError(String(err)); } catch (e) {}
+        }
+      };
+      window.stopGlowmatesSpeech = function () {
+        if (rec) {
+          try { rec.stop(); } catch (e) {}
+          try { rec.abort(); } catch (e) {}
+          rec = null;
+        }
+      };
+    })();
+  </script>
+
+  <!-- ============================================
+       小光球文本朗读 — Web Speech Synthesis API
+       因豆包 TTS HTTP 接口不允许浏览器跨域，Web 版改用浏览器内置 TTS
+       Native (iOS / Android / Windows) 仍走豆包 TTS
+       Dart 端调用：
+         window.glowmatesSpeak(text, lang, voiceHint, onEnd)
+         window.glowmatesCancelSpeak()
+         window.isGlowmatesTtsAvailable() : boolean
+  ============================================ -->
+  <script>
+    (function () {
+      var voices = [];
+      function loadVoices() {
+        if (window.speechSynthesis) {
+          voices = window.speechSynthesis.getVoices();
+        }
+      }
+      if (window.speechSynthesis) {
+        loadVoices();
+        window.speechSynthesis.onvoiceschanged = loadVoices;
+      }
+
+      window.isGlowmatesTtsAvailable = function () {
+        return typeof window.speechSynthesis !== 'undefined' &&
+               typeof window.SpeechSynthesisUtterance !== 'undefined';
+      };
+
+      window.glowmatesSpeak = function (text, lang, voiceHint, onEnd) {
+        if (!window.isGlowmatesTtsAvailable()) {
+          try { onEnd && onEnd('not_supported'); } catch (e) {}
+          return;
+        }
+        try { window.speechSynthesis.cancel(); } catch (e) {}
+        try {
+          var u = new SpeechSynthesisUtterance(text || '');
+          u.lang = lang || 'zh-CN';
+          // 找小女孩 / 温柔女声：优先含 'Xiaoxiao' / 'Yaoyao' / 'Hui' 字样
+          var preferred = ['xiaoxiao', 'yaoyao', 'huihui', 'tracy', 'zira'];
+          if (!voices || voices.length === 0) loadVoices();
+          var matched = null;
+          for (var i = 0; i < voices.length; i++) {
+            var v = voices[i];
+            var name = (v.name || '').toLowerCase();
+            if (v.lang && v.lang.toLowerCase().indexOf('zh') === 0) {
+              for (var j = 0; j < preferred.length; j++) {
+                if (name.indexOf(preferred[j]) >= 0) {
+                  matched = v;
+                  break;
+                }
+              }
+              if (matched) break;
+              // 兜底选第一个 zh-* 女声
+              if (!matched && (name.indexOf('female') >= 0 || name.indexOf('女') >= 0)) {
+                matched = v;
+              }
+            }
+          }
+          if (!matched) {
+            // 任何 zh-* 都行
+            for (var k = 0; k < voices.length; k++) {
+              if (voices[k].lang && voices[k].lang.toLowerCase().indexOf('zh') === 0) {
+                matched = voices[k];
+                break;
+              }
+            }
+          }
+          if (matched) u.voice = matched;
+          u.rate = 1.0;
+          u.pitch = 1.15;   // 稍微提高音调，更接近小女孩
+          u.volume = 1.0;
+          u.onend = function () { try { onEnd && onEnd(null); } catch (e) {} };
+          u.onerror = function (e) { try { onEnd && onEnd(e.error || 'error'); } catch (er) {} };
+          window.speechSynthesis.speak(u);
+        } catch (err) {
+          try { onEnd && onEnd(String(err)); } catch (e) {}
+        }
+      };
+
+      window.glowmatesCancelSpeak = function () {
+        try { window.speechSynthesis && window.speechSynthesis.cancel(); } catch (e) {}
+      };
+    })();
+  </script>
+
+  <!-- ============================================
+       豆包 TTS WebSocket 接口（火山引擎 SeedTTS）
+       wss:// 不受 XHR 那种 CORS preflight 限制，浏览器可直连
+       二进制协议：header(4) + payload_size(4 BE) + gzip(JSON)
+       Dart 端调用：
+         window.glowmatesDoubaoTtsWs(text, appId, token, cluster, voiceType, onDone, onError)
+           onDone(base64Mp3)  /  onError(msg)
+  ============================================ -->
+  <script>
+    (function () {
+      function mergeChunks(chunks) {
+        var total = 0;
+        for (var i = 0; i < chunks.length; i++) total += chunks[i].length;
+        var merged = new Uint8Array(total);
+        var pos = 0;
+        for (var j = 0; j < chunks.length; j++) {
+          merged.set(chunks[j], pos);
+          pos += chunks[j].length;
+        }
+        return merged;
+      }
+      function toBase64(bytes) {
+        var bin = '';
+        var CH = 0x8000;
+        for (var i = 0; i < bytes.length; i += CH) {
+          bin += String.fromCharCode.apply(null, bytes.subarray(i, i + CH));
+        }
+        return btoa(bin);
+      }
+
+      window.glowmatesDoubaoTtsWs = async function (text, appId, token, cluster, voiceType, onDone, onError) {
+        var finished = false;
+        function done(b64) { if (!finished) { finished = true; try { onDone(b64); } catch (e) {} } }
+        function fail(m) { if (!finished) { finished = true; try { onError(m); } catch (e) {} } }
+        try {
+          var reqid = (crypto && crypto.randomUUID) ? crypto.randomUUID() : ('req-' + Date.now());
+          var payload = {
+            app: { appid: appId, token: token, cluster: cluster },
+            user: { uid: 'glowmates_web' },
+            audio: {
+              voice_type: voiceType,
+              encoding: 'mp3',
+              speed_ratio: 1.0,
+              volume_ratio: 1.0,
+              pitch_ratio: 1.0
+            },
+            request: {
+              reqid: reqid,
+              text: text,
+              text_type: 'plain',
+              operation: 'submit'
+            }
+          };
+          var jsonBytes = new TextEncoder().encode(JSON.stringify(payload));
+
+          // gzip 压缩 payload
+          var cs = new CompressionStream('gzip');
+          var w = cs.writable.getWriter();
+          w.write(jsonBytes);
+          w.close();
+          var gzipped = new Uint8Array(await new Response(cs.readable).arrayBuffer());
+
+          // 拼二进制帧：header(4) + size(4 BE) + gzip payload
+          var frame = new Uint8Array(8 + gzipped.length);
+          frame[0] = 0x11; // version 1, header size 1
+          frame[1] = 0x10; // msg type 1 (full client request), flags 0
+          frame[2] = 0x11; // serialization JSON (1), compression gzip (1)
+          frame[3] = 0x00; // reserved
+          new DataView(frame.buffer).setUint32(4, gzipped.length, false);
+          frame.set(gzipped, 8);
+
+          var ws = new WebSocket('wss://openspeech.bytedance.com/api/v1/tts/ws_binary');
+          ws.binaryType = 'arraybuffer';
+          var chunks = [];
+
+          var timer = setTimeout(function () {
+            if (!finished) { try { ws.close(); } catch (e) {} fail('TTS 超时'); }
+          }, 15000);
+
+          ws.onopen = function () { ws.send(frame); };
+
+          ws.onmessage = async function (ev) {
+            var data = new Uint8Array(ev.data);
+            var dv = new DataView(data.buffer);
+            var headerSize = (data[0] & 0x0f) * 4;
+            var msgType = (data[1] >> 4) & 0x0f;
+            var flags = data[1] & 0x0f;
+            var compression = data[2] & 0x0f;
+            var offset = headerSize;
+
+            if (msgType === 0x0b) {
+              // 音频响应
+              var seq = 0;
+              if (flags & 0x01) { seq = dv.getInt32(offset, false); offset += 4; }
+              var size = dv.getUint32(offset, false); offset += 4;
+              var audio = data.slice(offset, offset + size);
+              if (audio.length > 0) chunks.push(audio);
+              // 负序号 或 flags>=2 表示最后一帧
+              if (seq < 0 || flags >= 2) {
+                clearTimeout(timer);
+                try { ws.close(); } catch (e) {}
+                if (chunks.length === 0) { fail('没收到音频数据'); return; }
+                done(toBase64(mergeChunks(chunks)));
+              }
+            } else if (msgType === 0x0f) {
+              // 错误响应
+              clearTimeout(timer);
+              var errCode = dv.getUint32(offset, false); offset += 4;
+              var msgSize = dv.getUint32(offset, false); offset += 4;
+              var errBytes = data.slice(offset, offset + msgSize);
+              if (compression === 1) {
+                try {
+                  var ds = new DecompressionStream('gzip');
+                  var dw = ds.writable.getWriter();
+                  dw.write(errBytes); dw.close();
+                  errBytes = new Uint8Array(await new Response(ds.readable).arrayBuffer());
+                } catch (e) {}
+              }
+              var errMsg = '';
+              try { errMsg = new TextDecoder().decode(errBytes); } catch (e) { errMsg = 'code ' + errCode; }
+              try { ws.close(); } catch (e) {}
+              fail('豆包TTS错误[' + errCode + ']: ' + errMsg);
+            }
+          };
+
+          ws.onerror = function () {
+            clearTimeout(timer);
+            fail('WebSocket 连接失败');
+          };
+          ws.onclose = function () {
+            clearTimeout(timer);
+            if (!finished) {
+              if (chunks.length > 0) {
+                done(toBase64(mergeChunks(chunks)));
+              } else {
+                fail('连接关闭，未收到音频');
+              }
+            }
+          };
+        } catch (e) {
+          fail(String(e));
+        }
+      };
+    })();
+  </script>
+  <!-- ============================================
+       电子相册 — 照片存浏览器 IndexedDB（本地、刷新不丢、不需要后端）
+       选图后用 canvas 压缩到最长边 1280px 的 JPEG，再存库。
+       Dart 端调用（回调收 JSON 字符串）：
+         window.glowmatesAlbumList(onResult, onError)
+         window.glowmatesAlbumAdd(onResult, onError)      // 弹文件选择器
+         window.glowmatesAlbumDelete(id, onResult, onError)
+         window.glowmatesAlbumSetOrder(idsJson, onResult, onError)
+         window.isGlowmatesAlbumAvailable() : boolean
+  ============================================ -->
+  <script>
+    (function () {
+      var DB_NAME = 'glowmates_album';
+      var STORE = 'photos';
+      var MAX_SIZE = 1280;
+      var JPEG_QUALITY = 0.82;
+
+      window.isGlowmatesAlbumAvailable = function () {
+        return !!window.indexedDB;
+      };
+
+      function openDb() {
+        return new Promise(function (resolve, reject) {
+          var req = indexedDB.open(DB_NAME, 1);
+          req.onupgradeneeded = function (e) {
+            var db = e.target.result;
+            if (!db.objectStoreNames.contains(STORE)) {
+              db.createObjectStore(STORE, { keyPath: 'id' });
+            }
+          };
+          req.onsuccess = function () { resolve(req.result); };
+          req.onerror = function () { reject(req.error); };
+        });
+      }
+
+      function listAll() {
+        return openDb().then(function (db) {
+          return new Promise(function (resolve, reject) {
+            var tx = db.transaction(STORE, 'readonly');
+            var req = tx.objectStore(STORE).getAll();
+            req.onsuccess = function () {
+              var arr = req.result || [];
+              arr.sort(function (a, b) {
+                return (a.order || 0) - (b.order || 0);
+              });
+              resolve(arr);
+            };
+            req.onerror = function () { reject(req.error); };
+          });
+        });
+      }
+
+      function putPhoto(photo) {
+        return openDb().then(function (db) {
+          return new Promise(function (resolve, reject) {
+            var tx = db.transaction(STORE, 'readwrite');
+            tx.objectStore(STORE).put(photo);
+            tx.oncomplete = function () { resolve(); };
+            tx.onerror = function () { reject(tx.error); };
+          });
+        });
+      }
+
+      function deletePhoto(id) {
+        return openDb().then(function (db) {
+          return new Promise(function (resolve, reject) {
+            var tx = db.transaction(STORE, 'readwrite');
+            tx.objectStore(STORE).delete(id);
+            tx.oncomplete = function () { resolve(); };
+            tx.onerror = function () { reject(tx.error); };
+          });
+        });
+      }
+
+      // 把任意图片 src（objectURL 或 dataURL）缩放到最长边 MAX_SIZE 的 JPEG
+      function resizeSrc(src, revoke) {
+        return new Promise(function (resolve, reject) {
+          var img = new Image();
+          img.onload = function () {
+            var w = img.width, h = img.height;
+            var scale = Math.min(1, MAX_SIZE / Math.max(w, h));
+            var cw = Math.max(1, Math.round(w * scale));
+            var ch = Math.max(1, Math.round(h * scale));
+            var canvas = document.createElement('canvas');
+            canvas.width = cw;
+            canvas.height = ch;
+            canvas.getContext('2d').drawImage(img, 0, 0, cw, ch);
+            if (revoke) URL.revokeObjectURL(src);
+            try {
+              resolve(canvas.toDataURL('image/jpeg', JPEG_QUALITY));
+            } catch (e) { reject(e); }
+          };
+          img.onerror = function () {
+            if (revoke) URL.revokeObjectURL(src);
+            reject('image load failed');
+          };
+          img.src = src;
+        });
+      }
+
+      function resizeImage(file) {
+        return resizeSrc(URL.createObjectURL(file), true);
+      }
+
+      window.glowmatesAlbumList = function (onResult, onError) {
+        listAll().then(function (arr) {
+          onResult(JSON.stringify(arr));
+        }).catch(function (e) {
+          try { onError(String(e)); } catch (x) {}
+        });
+      };
+
+      window.glowmatesAlbumAdd = function (onResult, onError) {
+        try {
+          var input = document.createElement('input');
+          input.type = 'file';
+          input.accept = 'image/*';
+          input.multiple = true;
+          input.style.display = 'none';
+          document.body.appendChild(input);
+          var cleanup = function () {
+            if (input.parentNode) document.body.removeChild(input);
+          };
+          input.onchange = function () {
+            var files = Array.prototype.slice.call(input.files || []);
+            cleanup();
+            if (files.length === 0) {
+              listAll().then(function (arr) {
+                onResult(JSON.stringify(arr));
+              }).catch(function (e) { onError(String(e)); });
+              return;
+            }
+            listAll().then(function (existing) {
+              var maxOrder = 0;
+              for (var i = 0; i < existing.length; i++) {
+                if ((existing[i].order || 0) > maxOrder) {
+                  maxOrder = existing[i].order;
+                }
+              }
+              var chain = Promise.resolve();
+              files.forEach(function (file, idx) {
+                chain = chain.then(function () {
+                  return resizeImage(file).then(function (dataUrl) {
+                    return putPhoto({
+                      id: 'p_' + Date.now() + '_' +
+                          Math.random().toString(36).slice(2, 8),
+                      dataUrl: dataUrl,
+                      order: maxOrder + idx + 1,
+                      createdAt: Date.now()
+                    });
+                  });
+                });
+              });
+              return chain;
+            }).then(function () {
+              return listAll();
+            }).then(function (arr) {
+              onResult(JSON.stringify(arr));
+            }).catch(function (e) {
+              try { onError(String(e)); } catch (x) {}
+            });
+          };
+          input.oncancel = function () {
+            cleanup();
+            listAll().then(function (arr) {
+              onResult(JSON.stringify(arr));
+            }).catch(function (e) { onError(String(e)); });
+          };
+          input.click();
+        } catch (e) {
+          try { onError(String(e)); } catch (x) {}
+        }
+      };
+
+      window.glowmatesAlbumDelete = function (id, onResult, onError) {
+        deletePhoto(id).then(function () {
+          return listAll();
+        }).then(function (arr) {
+          onResult(JSON.stringify(arr));
+        }).catch(function (e) {
+          try { onError(String(e)); } catch (x) {}
+        });
+      };
+
+      window.glowmatesAlbumSetOrder = function (idsJson, onResult, onError) {
+        var ids;
+        try { ids = JSON.parse(idsJson); }
+        catch (e) { try { onError('bad ids'); } catch (x) {} return; }
+        listAll().then(function (arr) {
+          var byId = {};
+          arr.forEach(function (p) { byId[p.id] = p; });
+          var chain = Promise.resolve();
+          ids.forEach(function (id, idx) {
+            var p = byId[id];
+            if (p) {
+              p.order = idx + 1;
+              chain = chain.then(function () { return putPhoto(p); });
+            }
+          });
+          return chain;
+        }).then(function () {
+          return listAll();
+        }).then(function (arr) {
+          onResult(JSON.stringify(arr));
+        }).catch(function (e) {
+          try { onError(String(e)); } catch (x) {}
+        });
+      };
+
+      // 直接把一组 dataUrl 写进相册（演示用：一键填充自带演示图）
+      // 每张都先经 canvas 压缩到 1280px，避免把大图原样塞进 IndexedDB
+      window.glowmatesAlbumAddDataUrls = function (dataUrlsJson, onResult, onError) {
+        var urls;
+        try { urls = JSON.parse(dataUrlsJson); }
+        catch (e) { try { onError('bad json'); } catch (x) {} return; }
+        listAll().then(function (existing) {
+          var maxOrder = 0;
+          for (var i = 0; i < existing.length; i++) {
+            if ((existing[i].order || 0) > maxOrder) {
+              maxOrder = existing[i].order;
+            }
+          }
+          var chain = Promise.resolve();
+          urls.forEach(function (dataUrl, idx) {
+            chain = chain.then(function () {
+              return resizeSrc(dataUrl, false).then(function (small) {
+                return putPhoto({
+                  id: 'p_' + Date.now() + '_' +
+                      Math.random().toString(36).slice(2, 8) + '_' + idx,
+                  dataUrl: small,
+                  order: maxOrder + idx + 1,
+                  createdAt: Date.now()
+                });
+              });
+            });
+          });
+          return chain;
+        }).then(function () {
+          return listAll();
+        }).then(function (arr) {
+          onResult(JSON.stringify(arr));
+        }).catch(function (e) {
+          try { onError(String(e)); } catch (x) {}
+        });
+      };
+    })();
+  </script>
+
+  <!-- ============================================
+       全局音效 — Web Audio 实时合成，不需要任何音频文件
+       Dart 端调用：window.glowmatesPlaySfx('score_plus')
+       可用名称：score_plus / score_minus / levelup / evolve /
+                click / orb_start / orb_stop / success / adopt
+  ============================================ -->
+  <script>
+    (function () {
+      var ctx = null;
+      function ac() {
+        if (!ctx) {
+          var AC = window.AudioContext || window.webkitAudioContext;
+          if (AC) ctx = new AC();
+        }
+        if (ctx && ctx.state === 'suspended') {
+          try { ctx.resume(); } catch (e) {}
+        }
+        return ctx;
+      }
+      // 单音：波形, 起始频率, 结束频率, 时长(s), 音量, 延迟(s)
+      function tone(type, f0, f1, dur, vol, delay) {
+        var c = ac(); if (!c) return;
+        var t0 = c.currentTime + (delay || 0);
+        var osc = c.createOscillator();
+        var gain = c.createGain();
+        osc.connect(gain); gain.connect(c.destination);
+        osc.type = type;
+        osc.frequency.setValueAtTime(f0, t0);
+        if (f1 && f1 !== f0) {
+          osc.frequency.exponentialRampToValueAtTime(
+              Math.max(1, f1), t0 + dur);
+        }
+        gain.gain.setValueAtTime(Math.max(0.0001, vol), t0);
+        gain.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+        osc.start(t0);
+        osc.stop(t0 + dur + 0.03);
+      }
+      // 琶音：频率数组, 间隔(s), 波形, 单音时长, 音量
+      function arp(freqs, step, type, dur, vol) {
+        freqs.forEach(function (f, i) {
+          tone(type, f, f, dur, vol, i * step);
+        });
+      }
+      var SFX = {
+        // 加分：明亮上扬的小三和弦琶音 + 一个高音点缀
+        score_plus: function () {
+          arp([523.25, 659.25, 783.99], 0.08, 'sine', 0.22, 0.26);
+          tone('sine', 1046.5, 1046.5, 0.3, 0.16, 0.24);
+        },
+        // 减分：温和的下行音，绝不刺耳（三角波 + 轻音量）
+        score_minus: function () {
+          tone('triangle', 392.0, 293.66, 0.36, 0.17, 0);
+          tone('sine', 261.63, 261.63, 0.3, 0.09, 0.2);
+        },
+        // 升级：欢快的四音上行
+        levelup: function () {
+          arp([523.25, 659.25, 783.99, 1046.5], 0.1, 'sine', 0.28, 0.22);
+        },
+        // 进化：上行琶音 + 两段闪光泛音（最隆重）
+        evolve: function () {
+          arp([392.0, 523.25, 659.25, 783.99, 1046.5], 0.11,
+              'sine', 0.34, 0.22);
+          tone('sine', 1568.0, 2093.0, 0.5, 0.13, 0.56);
+          tone('sine', 2093.0, 2637.0, 0.45, 0.09, 0.72);
+        },
+        // 认养：温柔的两音"叮咚"
+        adopt: function () {
+          arp([659.25, 987.77], 0.12, 'sine', 0.3, 0.2);
+        },
+        click: function () { tone('sine', 660, 440, 0.07, 0.11, 0); },
+        orb_start: function () { tone('sine', 440, 660, 0.18, 0.15, 0); },
+        orb_stop: function () { tone('sine', 660, 440, 0.18, 0.13, 0); },
+        success: function () {
+          arp([659.25, 880.0], 0.09, 'sine', 0.2, 0.2);
+        }
+      };
+      window.glowmatesPlaySfx = function (name) {
+        try { var fn = SFX[name]; if (fn) fn(); } catch (e) {}
+      };
+    })();
+  </script>
+
+  <!-- 加载遮罩样式：盖住 Flutter 字体回退完成前的"豆腐块"闪烁 -->
+  <style>
+    #glowmates-loading {
+      position: fixed;
+      inset: 0;
+      z-index: 999999;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      background: linear-gradient(160deg, #f3e8ff 0%, #fce7f3 50%, #fef3e8 100%);
+      transition: opacity 0.45s ease;
+      font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+    }
+    #glowmates-loading.fade-out {
+      opacity: 0;
+      pointer-events: none;
+    }
+    .gm-orb {
+      width: 78px;
+      height: 78px;
+      border-radius: 50%;
+      background: radial-gradient(circle at 35% 35%,
+        #ffffff 0%, #e0c2ff 35%, #bd8cff 100%);
+      box-shadow: 0 0 50px 14px rgba(189, 140, 255, 0.45),
+                  inset 0 0 22px rgba(255, 255, 255, 0.6);
+      animation: gm-breathe 1.6s ease-in-out infinite alternate;
+    }
+    @keyframes gm-breathe {
+      from { transform: scale(0.92); }
+      to   { transform: scale(1.06); }
+    }
+    .gm-title {
+      margin-top: 26px;
+      font-size: 22px;
+      font-weight: 800;
+      letter-spacing: 2px;
+      background: linear-gradient(90deg, #bd8cff, #ff9ec4, #ffb37a);
+      -webkit-background-clip: text;
+      background-clip: text;
+      color: transparent;
+    }
+    .gm-sub {
+      margin-top: 8px;
+      font-size: 13px;
+      color: #9b8fb5;
+      letter-spacing: 1px;
+    }
+  </style>
+</head>
+<body>
+  <!-- 启动加载遮罩 —— Flutter 第一帧渲染好后自动淡出移除 -->
+  <div id="glowmates-loading">
+    <div class="gm-orb"></div>
+    <div class="gm-title">Glowmates</div>
+    <div class="gm-sub">小光萌宠 · 加载中…</div>
+  </div>
+
+  <script>
+    var _gmMaskRemoved = false;
+    function _gmRemoveMask() {
+      if (_gmMaskRemoved) return;
+      _gmMaskRemoved = true;
+      var el = document.getElementById('glowmates-loading');
+      if (el) {
+        el.classList.add('fade-out');
+        setTimeout(function () { if (el && el.parentNode) el.remove(); }, 500);
+      }
+    }
+    // Flutter 渲染出第一帧后，再多等 900ms 让 CanvasKit 把中文字体下载解码完，
+    // 这样移除遮罩时界面已经是正常中文，不会看到"豆腐块"
+    window.addEventListener('flutter-first-frame', function () {
+      setTimeout(_gmRemoveMask, 900);
+    });
+    // 兜底：万一 first-frame 没触发，10 秒后强制移除
+    setTimeout(_gmRemoveMask, 10000);
+  </script>
+
+  <script src="flutter_bootstrap.js" async></script>
+</body>
+</html>
