@@ -1,0 +1,23 @@
+{
+  "_说明": "把下面 hooks 里的内容合并进你的 ~/.claude/settings.json。注意：",
+  "_说明2": "1) 把 PATH_TO 换成 light.py 的真实绝对路径。",
+  "_说明3": "2) Windows 用户把 python3 换成 python，路径用 C:/Users/你/.../light.py 这种正斜杠写法。",
+
+  "hooks": {
+    "UserPromptSubmit": [
+      { "hooks": [ { "type": "command", "command": "python3 PATH_TO/light.py G" } ] }
+    ],
+    "PreToolUse": [
+      { "hooks": [ { "type": "command", "command": "python3 PATH_TO/light.py G" } ] }
+    ],
+    "Notification": [
+      { "hooks": [ { "type": "command", "command": "python3 PATH_TO/light.py Y" } ] }
+    ],
+    "Stop": [
+      { "hooks": [ { "type": "command", "command": "python3 PATH_TO/light.py R" } ] }
+    ],
+    "SessionStart": [
+      { "hooks": [ { "type": "command", "command": "python3 PATH_TO/light.py R" } ] }
+    ]
+  }
+}
